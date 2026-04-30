@@ -5,24 +5,29 @@ Pipeline di preprocessing per Occupancy Grid 2D da bag ROS2.
 
 Obiettivo:
 - leggere in memoria i messaggi `/zed/zed_node/odom` e `/scan`
-- usare `bag_time_ns` come riferimento temporale comune
+- mantenere sia il timestamp di registrazione nella bag (`bag_time_ns`) sia il
+  timestamp interno del messaggio (`header_time_ns`)
+- scegliere il timestamp usato per la sincronizzazione tramite `timestamp_source`
 - convertire il quaternione in yaw
 - interpolare la posa ZED al tempo di ogni scan
 - applicare una trasformazione rigida approssimata ZED -> LiDAR
 - convertire i raggi LiDAR in punti 2D locali
 - trasformare i punti nel frame globale `odom`
 
+Il file NON costruisce ancora la occupancy grid: prepara soltanto i dati
+pronti per il mapping.
+
 Dipendenze principali:
 - rosbags
 - numpy
 
 Esempio d'uso:
-    python preprocess_bag.py /percorso/al_bag_folder
+    python preprocess_bag.py /percorso/al_bag_folder --timestamp-source header_time
 """
 
 import argparse
 import math
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -38,18 +43,26 @@ from rosbags.typesys import Stores, get_typestore
 DEFAULT_SCAN_TOPIC = "/scan"
 DEFAULT_ODOM_TOPIC = "/zed/zed_node/odom"
 
+# Sorgente temporale usata per sincronizzare scan e odometria.
+# - "bag_time": timestamp di registrazione nella bag
+# - "header_time": msg.header.stamp, più vicino all'istante dichiarato di acquisizione
+DEFAULT_TIMESTAMP_SOURCE = "header_time"
+VALID_TIMESTAMP_SOURCES = ("bag_time", "header_time")
+
 # Ipotesi iniziale ricavata dal contesto del progetto:
-# il LiDAR è circa 15 cm dietro la ZED, senza offset laterale sul piano.
-DEFAULT_ZED_TO_LIDAR_DX = -0.20
+# il LiDAR è circa 20 cm dietro la ZED, senza offset laterale sul piano.
+DEFAULT_ZED_TO_LIDAR_DX = 0.15
 DEFAULT_ZED_TO_LIDAR_DY = 0.0
 DEFAULT_ZED_TO_LIDAR_DYAW = 0.0
-DEFAULT_ZED_YAW_CORRECTION = 0.0
+DEFAULT_ZED_YAW_CORRECTION = 3.141592653589793
 
 # Se True, i raggi a distanza massima vengono tenuti come "free-only".
 # In questo file li convertiamo comunque in punti; la distinzione servirà poi
 # soprattutto nel mapping. Per partire in modo semplice li scartiamo.
 DEFAULT_KEEP_MAX_RANGE_RETURNS = False
 
+# Limite operativo scelto dopo l'analisi del LiDAR: anche se il messaggio dichiara
+# range_max=64 m, per il mapping usiamo un massimo effettivo più prudente.
 DEFAULT_EFFECTIVE_RANGE_MAX = 12.0
 
 # Tolleranza per considerare uno scan fuori dal range temporale dell'odom.
@@ -141,6 +154,7 @@ class PreprocessedBagData:
     odom_samples: Tuple[OdomSample, ...]
     scan_samples: Tuple[ScanSample, ...]
     aligned_scans: Tuple[AlignedScan, ...]
+    timestamp_source: str = DEFAULT_TIMESTAMP_SOURCE
 
 
 # =========================
@@ -198,16 +212,19 @@ def _ensure_ros2_bag_path(bag_path: str | Path) -> Path:
     return path
 
 
+
 def ros_stamp_to_ns(stamp: Any) -> int:
     """Converte msg.header.stamp in nanosecondi."""
     return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
 
 
+
 def choose_time_ns(
-        bag_time_ns: int,
-        header_time_ns: int,
-        timestamp_source: str,
+    bag_time_ns: int,
+    header_time_ns: int,
+    timestamp_source: str,
 ) -> int:
+    """Restituisce il timestamp operativo scelto per la sincronizzazione."""
     if timestamp_source == "bag_time":
         return bag_time_ns
     if timestamp_source == "header_time":
@@ -217,24 +234,41 @@ def choose_time_ns(
         "Usa 'bag_time' oppure 'header_time'."
     )
 
+
+
+def _validate_timestamp_source(timestamp_source: str) -> str:
+    if timestamp_source not in VALID_TIMESTAMP_SOURCES:
+        raise ValueError(
+            f"timestamp_source non valido: {timestamp_source}. "
+            f"Valori ammessi: {VALID_TIMESTAMP_SOURCES}"
+        )
+    return timestamp_source
+
+
+
 def _get_typestore():
     """Restituisce il typestore ROS2 generico usato da rosbags."""
     return get_typestore(Stores.ROS2_HUMBLE)
 
 
+
 def extract_odom_data(
     bag_path: str | Path,
     odom_topic: str = DEFAULT_ODOM_TOPIC,
+    timestamp_source: str = DEFAULT_TIMESTAMP_SOURCE,
 ) -> List[OdomSample]:
     """
     Estrae in memoria i campioni odometrici utili alla pipeline.
 
     Per ogni messaggio odom teniamo:
-    - bag_time_ns
+    - bag_time_ns: tempo di registrazione nella bag
+    - header_time_ns: tempo interno del messaggio
+    - time_ns: tempo scelto per sincronizzazione/interpolazione
     - x, y
     - quaternione completo
     - yaw già calcolato e normalizzato
     """
+    timestamp_source = _validate_timestamp_source(timestamp_source)
     bag_path = _ensure_ros2_bag_path(bag_path)
     typestore = _get_typestore()
     samples: List[OdomSample] = []
@@ -247,6 +281,14 @@ def extract_odom_data(
         for connection, timestamp_ns, rawdata in reader.messages(connections=connections):
             msg = reader.deserialize(rawdata, connection.msgtype)
 
+            bag_time_ns = int(timestamp_ns)
+            header_time_ns = ros_stamp_to_ns(msg.header.stamp)
+            time_ns = choose_time_ns(
+                bag_time_ns=bag_time_ns,
+                header_time_ns=header_time_ns,
+                timestamp_source=timestamp_source,
+            )
+
             x = float(msg.pose.pose.position.x)
             y = float(msg.pose.pose.position.y)
             qx = float(msg.pose.pose.orientation.x)
@@ -257,7 +299,9 @@ def extract_odom_data(
 
             samples.append(
                 OdomSample(
-                    bag_time_ns=int(timestamp_ns),
+                    bag_time_ns=bag_time_ns,
+                    header_time_ns=header_time_ns,
+                    time_ns=time_ns,
                     x=x,
                     y=y,
                     qx=qx,
@@ -268,7 +312,7 @@ def extract_odom_data(
                 )
             )
 
-    samples.sort(key=lambda s: s.bag_time_ns)
+    samples.sort(key=lambda s: s.time_ns)
     if not samples:
         raise ValueError(f"Nessun campione odom estratto da {odom_topic}")
     return samples
@@ -278,15 +322,21 @@ def extract_odom_data(
 def extract_scan_data(
     bag_path: str | Path,
     scan_topic: str = DEFAULT_SCAN_TOPIC,
+    timestamp_source: str = DEFAULT_TIMESTAMP_SOURCE,
 ) -> Tuple[LaserConfig, List[ScanSample]]:
     """
     Estrae in memoria i dati essenziali delle scansioni LiDAR.
 
-    Scelta progettuale:
-    - per ogni scan teniamo solo bag_time_ns + ranges
-    - i parametri geometrici del laser vengono letti una volta e messi in
-      LaserConfig, assumendo che siano costanti durante il bag
+    Per ogni scan teniamo:
+    - bag_time_ns
+    - header_time_ns
+    - time_ns: timestamp scelto per sincronizzazione/interpolazione
+    - ranges
+
+    I parametri geometrici del laser vengono letti una volta e messi in
+    LaserConfig, assumendo che siano costanti durante il bag.
     """
+    timestamp_source = _validate_timestamp_source(timestamp_source)
     bag_path = _ensure_ros2_bag_path(bag_path)
     typestore = _get_typestore()
 
@@ -301,8 +351,8 @@ def extract_scan_data(
         for connection, timestamp_ns, rawdata in reader.messages(connections=connections):
             msg = reader.deserialize(rawdata, connection.msgtype)
 
+            ranges = tuple(float(r) for r in msg.ranges)
             if laser_config is None:
-                ranges_tuple = tuple(float(r) for r in msg.ranges)
                 laser_config = LaserConfig(
                     frame_id=str(msg.header.frame_id),
                     angle_min=float(msg.angle_min),
@@ -312,15 +362,27 @@ def extract_scan_data(
                     scan_time=float(msg.scan_time),
                     range_min=float(msg.range_min),
                     range_max=float(msg.range_max),
-                    ray_count=len(ranges_tuple),
+                    ray_count=len(ranges),
                 )
-                ranges = ranges_tuple
-            else:
-                ranges = tuple(float(r) for r in msg.ranges)
 
-            samples.append(ScanSample(bag_time_ns=int(timestamp_ns), ranges=ranges))
+            bag_time_ns = int(timestamp_ns)
+            header_time_ns = ros_stamp_to_ns(msg.header.stamp)
+            time_ns = choose_time_ns(
+                bag_time_ns=bag_time_ns,
+                header_time_ns=header_time_ns,
+                timestamp_source=timestamp_source,
+            )
 
-    samples.sort(key=lambda s: s.bag_time_ns)
+            samples.append(
+                ScanSample(
+                    bag_time_ns=bag_time_ns,
+                    header_time_ns=header_time_ns,
+                    time_ns=time_ns,
+                    ranges=ranges,
+                )
+            )
+
+    samples.sort(key=lambda s: s.time_ns)
     if laser_config is None:
         raise ValueError(f"Nessuna scansione estratta da {scan_topic}")
     return laser_config, samples
@@ -346,17 +408,17 @@ def _find_bracketing_odom_indices(
     if not odom_samples:
         return None
 
-    first_t = odom_samples[0].bag_time_ns
-    last_t = odom_samples[-1].bag_time_ns
+    first_t = odom_samples[0].time_ns
+    last_t = odom_samples[-1].time_ns
     if target_time_ns < first_t or target_time_ns > last_t:
         return None
 
-    # Ricerca binaria semplice su lista ordinata.
+    # Ricerca binaria semplice su lista ordinata per time_ns.
     lo = 0
     hi = len(odom_samples) - 1
     while lo <= hi:
         mid = (lo + hi) // 2
-        t_mid = odom_samples[mid].bag_time_ns
+        t_mid = odom_samples[mid].time_ns
         if t_mid == target_time_ns:
             return mid, mid
         if t_mid < target_time_ns:
@@ -391,10 +453,10 @@ def interpolate_pose(
     s0 = odom_samples[i0]
     s1 = odom_samples[i1]
 
-    if i0 == i1 or s0.bag_time_ns == s1.bag_time_ns:
+    if i0 == i1 or s0.time_ns == s1.time_ns:
         return Pose2D(x=s0.x, y=s0.y, yaw=s0.yaw)
 
-    alpha = (target_time_ns - s0.bag_time_ns) / (s1.bag_time_ns - s0.bag_time_ns)
+    alpha = (target_time_ns - s0.time_ns) / (s1.time_ns - s0.time_ns)
     x = lerp(s0.x, s1.x, alpha)
     y = lerp(s0.y, s1.y, alpha)
     yaw = interpolate_yaw(s0.yaw, s1.yaw, alpha)
@@ -454,10 +516,10 @@ def compose_lidar_pose(
 
 
 def is_valid_range(
-        range_value: float,
-        laser_config: LaserConfig,
-        keep_max_range_returns: bool = DEFAULT_KEEP_MAX_RANGE_RETURNS,
-        effective_range_max: Optional[float] = DEFAULT_EFFECTIVE_RANGE_MAX,
+    range_value: float,
+    laser_config: LaserConfig,
+    keep_max_range_returns: bool = DEFAULT_KEEP_MAX_RANGE_RETURNS,
+    effective_range_max: Optional[float] = DEFAULT_EFFECTIVE_RANGE_MAX,
 ) -> bool:
     """
     Filtra i range invalidi.
@@ -488,6 +550,7 @@ def is_valid_range(
     return True
 
 
+
 def scan_to_local_points(
     scan_sample: ScanSample,
     laser_config: LaserConfig,
@@ -504,7 +567,12 @@ def scan_to_local_points(
     local_points: List[LocalPoint2D] = []
 
     for i, range_value in enumerate(scan_sample.ranges):
-        if not is_valid_range(range_value, laser_config, keep_max_range_returns, effective_range_max=effective_range_max):
+        if not is_valid_range(
+            range_value,
+            laser_config,
+            keep_max_range_returns,
+            effective_range_max=effective_range_max,
+        ):
             continue
 
         angle = laser_config.angle_min + i * laser_config.angle_increment
@@ -556,6 +624,7 @@ def process_bag_for_mapping(
     bag_path: str | Path,
     scan_topic: str = DEFAULT_SCAN_TOPIC,
     odom_topic: str = DEFAULT_ODOM_TOPIC,
+    timestamp_source: str = DEFAULT_TIMESTAMP_SOURCE,
     zed_to_lidar_dx: float = DEFAULT_ZED_TO_LIDAR_DX,
     zed_to_lidar_dy: float = DEFAULT_ZED_TO_LIDAR_DY,
     zed_to_lidar_dyaw: float = DEFAULT_ZED_TO_LIDAR_DYAW,
@@ -568,26 +637,37 @@ def process_bag_for_mapping(
     Esegue tutta la pipeline di preprocessing in memoria.
 
     Per ogni scan:
-    1. usa bag_time_ns come tempo di riferimento
-    2. stima la posa ZED a quel tempo
+    1. usa `time_ns` come tempo di riferimento, scelto da `timestamp_source`
+       (`bag_time` oppure `header_time`)
+    2. stima la posa ZED a quel tempo per interpolazione tra due odom
     3. ricava la posa LiDAR con la trasformazione fissa ZED -> LiDAR
     4. converte i raggi validi in punti 2D locali
     5. trasforma i punti nel frame globale odom
     """
-    odom_samples = extract_odom_data(bag_path, odom_topic=odom_topic)
-    laser_config, scan_samples = extract_scan_data(bag_path, scan_topic=scan_topic)
+    timestamp_source = _validate_timestamp_source(timestamp_source)
+
+    odom_samples = extract_odom_data(
+        bag_path,
+        odom_topic=odom_topic,
+        timestamp_source=timestamp_source,
+    )
+    laser_config, scan_samples = extract_scan_data(
+        bag_path,
+        scan_topic=scan_topic,
+        timestamp_source=timestamp_source,
+    )
 
     aligned_scans: List[AlignedScan] = []
     skipped_scans_outside_time = 0
 
     for scan in scan_samples:
-        zed_pose = interpolate_pose(odom_samples, scan.bag_time_ns)
+        zed_pose = interpolate_pose(odom_samples, scan.time_ns)
         if zed_pose is None:
             # Piccola estensione opzionale: se è fuori di poco dall'intervallo
             # consentiamo il clamp al campione più vicino, ma solo se richiesto.
             if time_tolerance_ns > 0:
-                first_dt = abs(scan.bag_time_ns - odom_samples[0].bag_time_ns)
-                last_dt = abs(scan.bag_time_ns - odom_samples[-1].bag_time_ns)
+                first_dt = abs(scan.time_ns - odom_samples[0].time_ns)
+                last_dt = abs(scan.time_ns - odom_samples[-1].time_ns)
                 if first_dt <= time_tolerance_ns:
                     zed_pose = Pose2D(odom_samples[0].x, odom_samples[0].y, odom_samples[0].yaw)
                 elif last_dt <= time_tolerance_ns:
@@ -616,6 +696,9 @@ def process_bag_for_mapping(
         aligned_scans.append(
             AlignedScan(
                 bag_time_ns=scan.bag_time_ns,
+                header_time_ns=scan.header_time_ns,
+                time_ns=scan.time_ns,
+                timestamp_source=timestamp_source,
                 zed_pose=zed_pose,
                 lidar_pose=lidar_pose,
                 local_points=tuple(local_points),
@@ -624,7 +707,10 @@ def process_bag_for_mapping(
         )
 
     if skipped_scans_outside_time > 0:
-        print(f"[INFO] Scan saltati perché fuori dal range temporale odom: {skipped_scans_outside_time}")
+        print(
+            f"[INFO] Scan saltati perché fuori dal range temporale odom "
+            f"({timestamp_source}): {skipped_scans_outside_time}"
+        )
 
     return PreprocessedBagData(
         bag_path=str(Path(bag_path)),
@@ -634,6 +720,7 @@ def process_bag_for_mapping(
         odom_samples=tuple(odom_samples),
         scan_samples=tuple(scan_samples),
         aligned_scans=tuple(aligned_scans),
+        timestamp_source=timestamp_source,
     )
 
 
@@ -644,10 +731,20 @@ def process_bag_for_mapping(
 
 def summarize_preprocessed_data(data: PreprocessedBagData) -> Dict[str, Any]:
     """Restituisce un piccolo riepilogo utile per debug rapido."""
-    first_odom_t = data.odom_samples[0].bag_time_ns if data.odom_samples else None
-    last_odom_t = data.odom_samples[-1].bag_time_ns if data.odom_samples else None
-    first_scan_t = data.scan_samples[0].bag_time_ns if data.scan_samples else None
-    last_scan_t = data.scan_samples[-1].bag_time_ns if data.scan_samples else None
+    first_odom_t = data.odom_samples[0].time_ns if data.odom_samples else None
+    last_odom_t = data.odom_samples[-1].time_ns if data.odom_samples else None
+    first_scan_t = data.scan_samples[0].time_ns if data.scan_samples else None
+    last_scan_t = data.scan_samples[-1].time_ns if data.scan_samples else None
+
+    first_odom_bag_t = data.odom_samples[0].bag_time_ns if data.odom_samples else None
+    last_odom_bag_t = data.odom_samples[-1].bag_time_ns if data.odom_samples else None
+    first_scan_bag_t = data.scan_samples[0].bag_time_ns if data.scan_samples else None
+    last_scan_bag_t = data.scan_samples[-1].bag_time_ns if data.scan_samples else None
+
+    first_odom_header_t = data.odom_samples[0].header_time_ns if data.odom_samples else None
+    last_odom_header_t = data.odom_samples[-1].header_time_ns if data.odom_samples else None
+    first_scan_header_t = data.scan_samples[0].header_time_ns if data.scan_samples else None
+    last_scan_header_t = data.scan_samples[-1].header_time_ns if data.scan_samples else None
 
     total_local_points = sum(len(s.local_points) for s in data.aligned_scans)
     total_global_points = sum(len(s.global_points) for s in data.aligned_scans)
@@ -659,18 +756,29 @@ def summarize_preprocessed_data(data: PreprocessedBagData) -> Dict[str, Any]:
         "bag_path": data.bag_path,
         "scan_topic": data.scan_topic,
         "odom_topic": data.odom_topic,
+        "timestamp_source": data.timestamp_source,
         "num_odom_samples": len(data.odom_samples),
         "num_scan_samples": len(data.scan_samples),
         "num_aligned_scans": len(data.aligned_scans),
-        "first_odom_bag_time_ns": first_odom_t,
-        "last_odom_bag_time_ns": last_odom_t,
-        "first_scan_bag_time_ns": first_scan_t,
-        "last_scan_bag_time_ns": last_scan_t,
+        "first_odom_time_ns": first_odom_t,
+        "last_odom_time_ns": last_odom_t,
+        "first_scan_time_ns": first_scan_t,
+        "last_scan_time_ns": last_scan_t,
+        "first_odom_bag_time_ns": first_odom_bag_t,
+        "last_odom_bag_time_ns": last_odom_bag_t,
+        "first_scan_bag_time_ns": first_scan_bag_t,
+        "last_scan_bag_time_ns": last_scan_bag_t,
+        "first_odom_header_time_ns": first_odom_header_t,
+        "last_odom_header_time_ns": last_odom_header_t,
+        "first_scan_header_time_ns": first_scan_header_t,
+        "last_scan_header_time_ns": last_scan_header_t,
         "laser_frame_id": data.laser_config.frame_id,
         "laser_ray_count": data.laser_config.ray_count,
         "laser_angle_min": data.laser_config.angle_min,
         "laser_angle_max": data.laser_config.angle_max,
         "laser_angle_increment": data.laser_config.angle_increment,
+        "laser_range_min": data.laser_config.range_min,
+        "laser_range_max_declared": data.laser_config.range_max,
         "total_local_points": total_local_points,
         "total_global_points": total_global_points,
         "mean_points_per_scan": mean_points_per_scan,
@@ -685,7 +793,10 @@ def debug_first_aligned_scan(data: PreprocessedBagData, max_points: int = 10) ->
 
     scan = data.aligned_scans[0]
     return {
+        "timestamp_source": scan.timestamp_source,
         "bag_time_ns": scan.bag_time_ns,
+        "header_time_ns": scan.header_time_ns,
+        "time_ns": scan.time_ns,
         "zed_pose": asdict(scan.zed_pose),
         "lidar_pose": asdict(scan.lidar_pose),
         "num_local_points": len(scan.local_points),
@@ -707,6 +818,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("bag_path", type=str, help="Percorso della cartella del bag ROS2")
     parser.add_argument("--scan-topic", type=str, default=DEFAULT_SCAN_TOPIC)
     parser.add_argument("--odom-topic", type=str, default=DEFAULT_ODOM_TOPIC)
+    parser.add_argument(
+        "--timestamp-source",
+        type=str,
+        default=DEFAULT_TIMESTAMP_SOURCE,
+        choices=VALID_TIMESTAMP_SOURCES,
+        help="Timestamp usato per sincronizzare scan e odom: bag_time oppure header_time",
+    )
     parser.add_argument("--zed-to-lidar-dx", type=float, default=DEFAULT_ZED_TO_LIDAR_DX)
     parser.add_argument("--zed-to-lidar-dy", type=float, default=DEFAULT_ZED_TO_LIDAR_DY)
     parser.add_argument("--zed-to-lidar-dyaw", type=float, default=DEFAULT_ZED_TO_LIDAR_DYAW)
@@ -726,7 +844,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--effective-range-max",
         type=float,
         default=DEFAULT_EFFECTIVE_RANGE_MAX,
-        help="Range massimo effettivo usato dal preprocess. Usa None nel codice per disabilitarlo.",
+        help="Range massimo effettivo usato dal preprocess. Usa un valore negativo per disabilitarlo.",
     )
     return parser
 
@@ -735,17 +853,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_arg_parser().parse_args()
 
+    effective_range_max: Optional[float]
+    if args.effective_range_max is not None and args.effective_range_max < 0:
+        effective_range_max = None
+    else:
+        effective_range_max = args.effective_range_max
+
     data = process_bag_for_mapping(
         bag_path=args.bag_path,
         scan_topic=args.scan_topic,
         odom_topic=args.odom_topic,
+        timestamp_source=args.timestamp_source,
         zed_to_lidar_dx=args.zed_to_lidar_dx,
         zed_to_lidar_dy=args.zed_to_lidar_dy,
         zed_to_lidar_dyaw=args.zed_to_lidar_dyaw,
         zed_yaw_correction=args.zed_yaw_correction,
         keep_max_range_returns=args.keep_max_range_returns,
         time_tolerance_ns=args.time_tolerance_ns,
-        effective_range_max=args.effective_range_max,
+        effective_range_max=effective_range_max,
     )
 
     summary = summarize_preprocessed_data(data)

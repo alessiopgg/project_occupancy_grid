@@ -20,13 +20,13 @@ Uso tipico da import:
         save_all_outputs,
     )
 
-    data = process_bag_for_mapping("/percorso/al/bag")
+    data = process_bag_for_mapping("/percorso/al/bag", timestamp_source="header_time")
     result = build_occupancy_grid(data, OccupancyGridConfig())
     out_dir = create_experiment_output_dir(data.bag_path)
     save_all_outputs(result, out_dir)
 
 Uso tipico da terminale:
-    python build_occupancy_grid.py /percorso/al/bag --results-root ./results
+    python build_occupancy_grid.py /percorso/al/bag --timestamp-source header_time --results-root ./results
 """
 
 import argparse
@@ -41,10 +41,13 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import numpy as np
 
 from preprocess_bag import (
+    DEFAULT_EFFECTIVE_RANGE_MAX,
     DEFAULT_KEEP_MAX_RANGE_RETURNS,
     DEFAULT_ODOM_TOPIC,
     DEFAULT_SCAN_TOPIC,
     DEFAULT_TIME_TOLERANCE_NS,
+    DEFAULT_TIMESTAMP_SOURCE,
+    VALID_TIMESTAMP_SOURCES,
     DEFAULT_ZED_TO_LIDAR_DX,
     DEFAULT_ZED_TO_LIDAR_DY,
     DEFAULT_ZED_TO_LIDAR_DYAW,
@@ -685,6 +688,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Parametri preprocess già esistenti.
     parser.add_argument("--scan-topic", type=str, default=DEFAULT_SCAN_TOPIC)
     parser.add_argument("--odom-topic", type=str, default=DEFAULT_ODOM_TOPIC)
+    parser.add_argument(
+        "--timestamp-source",
+        type=str,
+        default=DEFAULT_TIMESTAMP_SOURCE,
+        choices=VALID_TIMESTAMP_SOURCES,
+        help="Timestamp usato per sincronizzare scan e odom: bag_time oppure header_time",
+    )
     parser.add_argument("--zed-to-lidar-dx", type=float, default=DEFAULT_ZED_TO_LIDAR_DX)
     parser.add_argument("--zed-to-lidar-dy", type=float, default=DEFAULT_ZED_TO_LIDAR_DY)
     parser.add_argument("--zed-to-lidar-dyaw", type=float, default=DEFAULT_ZED_TO_LIDAR_DYAW)
@@ -700,6 +710,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_TIME_TOLERANCE_NS,
         help="Tolleranza opzionale di clamp temporale nel preprocess",
+    )
+    parser.add_argument(
+        "--effective-range-max",
+        type=float,
+        default=DEFAULT_EFFECTIVE_RANGE_MAX,
+        help="Range massimo effettivo usato dal preprocess. Usa un valore negativo per disabilitarlo.",
     )
 
     # Parametri mapping.
@@ -725,16 +741,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_arg_parser().parse_args()
 
+    effective_range_max = None if args.effective_range_max is not None and args.effective_range_max < 0 else args.effective_range_max
+
     data = process_bag_for_mapping(
         bag_path=args.bag_path,
         scan_topic=args.scan_topic,
         odom_topic=args.odom_topic,
+        timestamp_source=args.timestamp_source,
         zed_to_lidar_dx=args.zed_to_lidar_dx,
         zed_to_lidar_dy=args.zed_to_lidar_dy,
         zed_to_lidar_dyaw=args.zed_to_lidar_dyaw,
         zed_yaw_correction=args.zed_yaw_correction,
         keep_max_range_returns=args.keep_max_range_returns,
         time_tolerance_ns=args.time_tolerance_ns,
+        effective_range_max=effective_range_max,
     )
 
     config = OccupancyGridConfig(
