@@ -4,7 +4,7 @@ from __future__ import annotations
 Script minimo di test per preprocess + occupancy grid.
 
 Uso:
-    python test_mapping.py
+    python run_test_mapping.py
 
 Prima di eseguirlo, aggiorna soprattutto:
 - BAG_PATH
@@ -29,22 +29,23 @@ from build_occupancy_grid import (
 # Parametri da cambiare qui
 # =========================
 
-BAG_PATH = r"D:\tesi\acquisizioni\rosbag2_2024_12_03-14_22_49"
+BAG_PATH = r"D:\tesi\acquisizioni\testInAula\rosbag2_2024_11_15-16_36_27"
 RESULTS_ROOT = Path("results")
 EXPERIMENT_TAG = "experiment"
 
 CONFIG = OccupancyGridConfig(
-    resolution=0.05,
+    resolution=0.1,
     margin=1.0,
-    p_occ=0.70,
-    p_free=0.35,
+    p_occ=0.75,
+    p_free=0.40,
     log_odds_min=-4.0,
     log_odds_max=4.0,
     free_threshold=0.35,
-    occ_threshold=0.65,
+    occ_threshold=0.75,
     scan_stride=1,
     exclude_origin_cell_from_free=False,
 )
+
 
 
 def main() -> None:

@@ -40,7 +40,7 @@ DEFAULT_ODOM_TOPIC = "/zed/zed_node/odom"
 
 # Ipotesi iniziale ricavata dal contesto del progetto:
 # il LiDAR è circa 15 cm dietro la ZED, senza offset laterale sul piano.
-DEFAULT_ZED_TO_LIDAR_DX = -0.15
+DEFAULT_ZED_TO_LIDAR_DX = -0.20
 DEFAULT_ZED_TO_LIDAR_DY = 0.0
 DEFAULT_ZED_TO_LIDAR_DYAW = 0.0
 DEFAULT_ZED_YAW_CORRECTION = 0.0
@@ -49,6 +49,8 @@ DEFAULT_ZED_YAW_CORRECTION = 0.0
 # In questo file li convertiamo comunque in punti; la distinzione servirà poi
 # soprattutto nel mapping. Per partire in modo semplice li scartiamo.
 DEFAULT_KEEP_MAX_RANGE_RETURNS = False
+
+DEFAULT_EFFECTIVE_RANGE_MAX = 12.0
 
 # Tolleranza per considerare uno scan fuori dal range temporale dell'odom.
 DEFAULT_TIME_TOLERANCE_NS = 0
@@ -61,6 +63,8 @@ DEFAULT_TIME_TOLERANCE_NS = 0
 @dataclass(frozen=True)
 class OdomSample:
     bag_time_ns: int
+    header_time_ns: int
+    time_ns: int
     x: float
     y: float
     qx: float
@@ -73,6 +77,8 @@ class OdomSample:
 @dataclass(frozen=True)
 class ScanSample:
     bag_time_ns: int
+    header_time_ns: int
+    time_ns: int
     ranges: Tuple[float, ...]
 
 
@@ -117,6 +123,9 @@ class GlobalPoint2D:
 @dataclass(frozen=True)
 class AlignedScan:
     bag_time_ns: int
+    header_time_ns: int
+    time_ns: int
+    timestamp_source: str
     zed_pose: Pose2D
     lidar_pose: Pose2D
     local_points: Tuple[LocalPoint2D, ...]
@@ -189,11 +198,28 @@ def _ensure_ros2_bag_path(bag_path: str | Path) -> Path:
     return path
 
 
+def ros_stamp_to_ns(stamp: Any) -> int:
+    """Converte msg.header.stamp in nanosecondi."""
+    return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
+
+
+def choose_time_ns(
+        bag_time_ns: int,
+        header_time_ns: int,
+        timestamp_source: str,
+) -> int:
+    if timestamp_source == "bag_time":
+        return bag_time_ns
+    if timestamp_source == "header_time":
+        return header_time_ns
+    raise ValueError(
+        f"timestamp_source non valido: {timestamp_source}. "
+        "Usa 'bag_time' oppure 'header_time'."
+    )
 
 def _get_typestore():
     """Restituisce il typestore ROS2 generico usato da rosbags."""
     return get_typestore(Stores.ROS2_HUMBLE)
-
 
 
 def extract_odom_data(
@@ -428,18 +454,20 @@ def compose_lidar_pose(
 
 
 def is_valid_range(
-    range_value: float,
-    laser_config: LaserConfig,
-    keep_max_range_returns: bool = DEFAULT_KEEP_MAX_RANGE_RETURNS,
+        range_value: float,
+        laser_config: LaserConfig,
+        keep_max_range_returns: bool = DEFAULT_KEEP_MAX_RANGE_RETURNS,
+        effective_range_max: Optional[float] = DEFAULT_EFFECTIVE_RANGE_MAX,
 ) -> bool:
     """
     Filtra i range invalidi.
 
-    Regole minime adottate nel progetto:
+    Regole:
     - scarta 0.0
     - scarta non finiti
     - scarta <= range_min
-    - gestione del range_max configurabile
+    - scarta > range_max dichiarato dal messaggio
+    - se impostato, scarta > effective_range_max
     """
     if not math.isfinite(range_value):
         return False
@@ -449,16 +477,22 @@ def is_valid_range(
         return False
     if range_value > laser_config.range_max:
         return False
+
+    # Limite fisico/operativo scelto per il nostro sensore.
+    if effective_range_max is not None and range_value > effective_range_max:
+        return False
+
     if not keep_max_range_returns and math.isclose(range_value, laser_config.range_max):
         return False
-    return True
 
+    return True
 
 
 def scan_to_local_points(
     scan_sample: ScanSample,
     laser_config: LaserConfig,
     keep_max_range_returns: bool = DEFAULT_KEEP_MAX_RANGE_RETURNS,
+    effective_range_max: Optional[float] = DEFAULT_EFFECTIVE_RANGE_MAX,
 ) -> List[LocalPoint2D]:
     """
     Converte una scansione in punti 2D locali del LiDAR.
@@ -470,7 +504,7 @@ def scan_to_local_points(
     local_points: List[LocalPoint2D] = []
 
     for i, range_value in enumerate(scan_sample.ranges):
-        if not is_valid_range(range_value, laser_config, keep_max_range_returns):
+        if not is_valid_range(range_value, laser_config, keep_max_range_returns, effective_range_max=effective_range_max):
             continue
 
         angle = laser_config.angle_min + i * laser_config.angle_increment
@@ -528,6 +562,7 @@ def process_bag_for_mapping(
     zed_yaw_correction: float = DEFAULT_ZED_YAW_CORRECTION,
     keep_max_range_returns: bool = DEFAULT_KEEP_MAX_RANGE_RETURNS,
     time_tolerance_ns: int = DEFAULT_TIME_TOLERANCE_NS,
+    effective_range_max: Optional[float] = DEFAULT_EFFECTIVE_RANGE_MAX,
 ) -> PreprocessedBagData:
     """
     Esegue tutta la pipeline di preprocessing in memoria.
@@ -574,6 +609,7 @@ def process_bag_for_mapping(
             scan,
             laser_config,
             keep_max_range_returns=keep_max_range_returns,
+            effective_range_max=effective_range_max,
         )
         global_points = local_to_global_points(local_points, lidar_pose)
 
@@ -686,6 +722,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=DEFAULT_TIME_TOLERANCE_NS,
         help="Tolleranza opzionale per clamp temporale fuori dall'intervallo odom",
     )
+    parser.add_argument(
+        "--effective-range-max",
+        type=float,
+        default=DEFAULT_EFFECTIVE_RANGE_MAX,
+        help="Range massimo effettivo usato dal preprocess. Usa None nel codice per disabilitarlo.",
+    )
     return parser
 
 
@@ -703,6 +745,7 @@ def main() -> None:
         zed_yaw_correction=args.zed_yaw_correction,
         keep_max_range_returns=args.keep_max_range_returns,
         time_tolerance_ns=args.time_tolerance_ns,
+        effective_range_max=args.effective_range_max,
     )
 
     summary = summarize_preprocessed_data(data)
