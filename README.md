@@ -38,7 +38,7 @@ La viewer permette di osservare l'evoluzione della mappa scan dopo scan, confron
 - la **mappa del singolo scan**;
 - la distribuzione dei **raggi LiDAR** dello scan corrente.
 
-[Guarda la demo della viewer](media/viewer_demo.mp4)
+![Demo viewer](media/viewer_demo.gif)
 
 ---
 
