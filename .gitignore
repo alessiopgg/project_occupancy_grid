@@ -1,0 +1,20 @@
+# PyCharm / IntelliJ
+.idea/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Output esperimenti
+results/
+
+# File temporanei
+.DS_Store
+Thumbs.db
