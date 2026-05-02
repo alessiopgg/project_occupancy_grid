@@ -34,7 +34,7 @@ from build_occupancy_grid import (
 # Parametri da cambiare qui
 # =========================
 
-BAG_PATH = r"D:\tesi\acquisizioni\testInAula\rosbag2_2023_11_21-22_23_45"
+BAG_PATH = r"D:\tesi\acquisizioni\rosbag2_2024_11_25-14_36_23"
 RESULTS_ROOT = Path("results")
 
 # Dopo il confronto bag_time/header_time, usiamo header_time come default.
