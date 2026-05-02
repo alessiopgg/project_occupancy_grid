@@ -113,17 +113,6 @@ Ogni sottocartella contiene:
 - `metadata.yaml`: metadati della registrazione ROS2;
 - file `.db3`: database SQLite con i messaggi registrati.
 
-> Nota: i file `.db3` possono essere pesanti. Se GitHub blocca il push o segnala file troppo grandi, è consigliato usare **Git LFS**.
-
-Comandi utili per Git LFS:
-
-```bash
-git lfs install
-git lfs track "*.db3"
-git add .gitattributes
-git add bag_data_example/
-git commit -m "Add sample ROS2 bags for reproducibility"
-```
 
 ---
 
@@ -162,36 +151,6 @@ Output principali:
 - `classified_grid.npy`: griglia classificata;
 - `occupancy_grid_metadata.json`: parametri e riepilogo numerico;
 - `viewer.html`: viewer interattiva per l'analisi step-by-step.
-
----
-
-## Struttura consigliata del repository
-
-```text
-project_work_autonomous/
-├── README.md
-├── occupancy_grid_Poggesi_AARI.pdf
-├── preprocess_bag.py
-├── build_occupancy_grid.py
-├── run_test_mapping.py
-├── zero_ray_explainability_viewer_v2.py
-├── images/
-│   ├── occupancy_probability.png
-│   └── occupancy_classified.png
-├── media/
-│   ├── viewer_demo.gif
-│   └── viewer_demo.mp4
-├── bag_data_example/
-│   ├── rosbag2_2023_11_21-22_23_45/
-│   │   ├── metadata.yaml
-│   │   └── rosbag2_2023_11_21-22_23_45_0.db3
-│   └── rosbag2_2024_12_03-14_25_05/
-│       ├── metadata.yaml
-│       └── rosbag2_2024_12_03-14_25_05_0.db3
-└── results/
-```
-
-> La cartella `results/` può essere esclusa dal repository se contiene output pesanti o generati automaticamente.
 
 ---
 
