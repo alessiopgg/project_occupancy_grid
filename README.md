@@ -100,9 +100,6 @@ La struttura prevista è:
 
 ```text
 bag_data_example/
-├── rosbag2_2023_11_21-22_23_45/
-│   ├── metadata.yaml
-│   └── rosbag2_2023_11_21-22_23_45_0.db3
 └── rosbag2_2024_12_03-14_25_05/
     ├── metadata.yaml
     └── rosbag2_2024_12_03-14_25_05_0.db3
