@@ -38,22 +38,6 @@ La viewer permette di osservare l'evoluzione della mappa scan dopo scan, confron
 - la **mappa del singolo scan**;
 - la distribuzione dei **raggi LiDAR** dello scan corrente.
 
-### GIF consigliata per GitHub
-
-```markdown
-![Demo viewer](media/viewer_demo.gif)
-```
-
-![Demo viewer](media/viewer_demo.gif)
-
-### Alternativa con video MP4
-
-Se si preferisce mantenere un video invece di una GIF, è possibile inserirlo come link:
-
-```markdown
-[Guarda la demo della viewer](media/viewer_demo.mp4)
-```
-
 [Guarda la demo della viewer](media/viewer_demo.mp4)
 
 ---
@@ -62,20 +46,11 @@ Se si preferisce mantenere un video invece di una GIF, è possibile inserirlo co
 
 ### Mappa probabilistica
 
-```markdown
-![Occupancy probability map](images/occupancy_probability.png)
-```
-
-![Occupancy probability map](images/occupancy_probability.png)
+![Occupancy probability map](media/occupancy_probability.png)
 
 ### Mappa classificata
 
-```markdown
-![Occupancy classified map](images/occupancy_classified.png)
-```
-
-![Occupancy classified map](images/occupancy_classified.png)
-
+![Occupancy classified map](media/occupancy_classified.png)
 ---
 
 ## File principali
